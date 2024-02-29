@@ -80,17 +80,17 @@ size = MPI.size(comm)
 parameters = {
     'dt': 0.018,
     "dy": 0.4,     
-    "Nx_aprox": 300,
-    "Ny_aprox": 300,
-    "max_level": 4, # Maximum level of Coarsening
+    "Nx_aprox": 320,
+    "Ny_aprox": 320,
+    "max_level": 6, # Maximum level of Coarsening
     'w0': 1,
     'Tau_0': 1,
     'at': lambda: 1 / (2 * fe.sqrt(2.0)),
     'ep_4': 0.02,
     'k_eq': 0.15,
     'lamda': 3.1913,
-    'm_c_inf': 0.5325,
-    "theta_answer_constant" : - 0.55,
+    'm_c_inf': 1 , #0.5325
+    "theta_answer_constant" :0 , # -0.55
     "omega" : 0.55,
     'opk': lambda k_eq: 1 + k_eq,
     'omk': lambda k_eq: 1 - k_eq,
@@ -100,9 +100,9 @@ parameters = {
     'd0': lambda a1, lamda: a1 / lamda,
     'Initial_Circle_radius': lambda d0: 44 * d0,
     'rad': lambda Initial_Circle_radius: Initial_Circle_radius,
-    'center': [0.0, 0.0],
-    "abs_tol": 1e-7,
-    "rel_tol": 1e-6,
+    'center': [0, 0],
+    "abs_tol": 1e-6,
+    "rel_tol": 1e-5,
 }
 
 # To access and compute values with dependencies, call the lambda functions with necessary arguments
@@ -161,7 +161,8 @@ nx = (int)(Nx / dy_coarse )
 ny = (int)(Ny / dy_coarse )
 
 
-
+parameters['Nx'] = Nx
+parameters["Ny"] = Ny
 
 #############################  END  ################################
 
@@ -197,13 +198,15 @@ class InitialConditions(UserExpression):
     rad = Initial_Circle_radius
 
     def eval(self, values, x):
-        xc = x[0]
-        yc = x[1]
-        dist = xc**2 + yc**2
+        global center
+        xc, yc = center
+        xp = x[0]
+        yp = x[1]
+        dist = ( xp - xc) **2 + ( yp - yc ) **2
 
         values[0] = -np.tanh((fe.sqrt(dist) - self.rad) / (fe.sqrt(2.0)))
 
-        values[1] = 0 # - omega or solutal undercooling
+        values[1] = - omega  # - omega or solutal undercooling
 
 
 
@@ -270,7 +273,7 @@ def calculate_dependent_variables(variables_dict, parameters):
     w0 = parameters['w0']
     ep_4 = parameters['ep_4']
     # Retrieve the values from the dictionary
-    phi_answer = variables_dict['Phi_answer']
+    phi_answer = variables_dict['Phi_prev']
 
     # Define tolerance for avoiding division by zero errors
     tolerance_d = fe.sqrt(DOLFIN_EPS)  # sqrt(1e-15)
@@ -349,21 +352,23 @@ def calculate_equation_1(variables_dict, dep_var_dict, parameters):
     )
 
 
-    u_for_tau = omega / ( 1 - ( 1- k_eq )* omega )
+    # u_for_tau = omega / ( 1 - omk * omega )
 
-    tau_n = (w_n / w0) ** 2 * (m_c_inf * (1 + (1 - k_eq) * u_for_tau))
+    # tau_n = (w_n / w0) ** 2 * (m_c_inf * (1 + (1 - k_eq) * u_for_tau))
+
+    tau_n = (w_n / w0) ** 2 
 
     # tau_n = (w_n / w0) ** 2 * ( m_c_inf * (1 + (1 - k_eq) * u_answer))
     # tau_n = (w_n / w0) ** 2 
 
-    term1 = -fe.inner((tau_n) * (phi_answer - phi_prev) / dt, v_test) * fe.dx
+    term1 = - fe.inner((tau_n) * (phi_answer - phi_prev) / dt, v_test) * fe.dx
 
     eq1 = term1 + term2 + term3 + term4 + term5
 
     return eq1
 
 
-def calculate_equation_2(variables_dict, parameters):
+def calculate_equation_2(variables_dict, dep_var_dict , parameters):
     
     # Retrieve the values from the dictionary
     at = parameters['at']
@@ -377,6 +382,11 @@ def calculate_equation_2(variables_dict, parameters):
     phi_prev = variables_dict['Phi_prev']
     u_prev = variables_dict['U_prev']
     q_test = variables_dict['test_2']
+
+    w_n = dep_var_dict['W_n']
+
+
+
 
 
     tolerance_d = fe.sqrt(DOLFIN_EPS)  # sqrt(1e-15)
@@ -392,18 +402,52 @@ def calculate_equation_2(variables_dict, parameters):
 
     term6 = -fe.inner(((opk) / 2 - (omk) * phi_answer / 2) * (u_answer - u_prev) / dt, q_test) * fe.dx
     term7 = -fe.inner(d * (1 - phi_answer) / 2 * fe.grad(u_answer), fe.grad(q_test)) * fe.dx
-    term8 = -at * (1 + (omk) * u_answer) * dphidt * fe.inner(norm, fe.grad(q_test)) * fe.dx
+
+    term8 = -(1 * at) * (1 + (omk) * u_answer) * dphidt * fe.inner(norm, fe.grad(q_test)) * fe.dx
+    # term8 = -(w_n * at) * (1 + (omk) * u_answer) * dphidt * fe.inner(norm, fe.grad(q_test)) * fe.dx
     term9 = (1 + (omk) * u_answer) * dphidt / 2 * q_test * fe.dx
 
     eq2 = term6 + term7 + term8 + term9
 
+
     return eq2
 
 
+def define_boundary_condition(variables_dict, physical_parameters_dict) :
 
 
 
-def define_problem(eq1, eq2, phi_u, parameters):
+    omega = physical_parameters_dict["omega"]
+    Nx = physical_parameters_dict['Nx']
+    Ny = physical_parameters_dict['Ny']
+    W = variables_dict['function_space']
+
+    # Define boundary conditions for velocity, pressure, and temperature
+    class RightBoundary(fe.SubDomain):
+        def inside(self, x, on_boundary):
+            return on_boundary and fe.near(x[0], Nx)
+
+    class TopBoundary(fe.SubDomain):
+        def inside(self, x, on_boundary):
+            return on_boundary and fe.near(x[1], Ny)
+
+    # Instantiate boundary classes
+    right_boundary = RightBoundary()
+    top_boundary = TopBoundary()
+    # Define Dirichlet boundary conditions
+
+    # bc_u_right = fe.DirichletBC(W.sub(1), fe.Constant(- omega), right_boundary)
+    # bc_u_top = fe.DirichletBC(W.sub(1), fe.Constant(- omega), top_boundary)
+    bc_u_right = fe.DirichletBC(W.sub(1), fe.Constant(0), right_boundary)
+    bc_u_top = fe.DirichletBC(W.sub(1), fe.Constant(0), top_boundary)
+
+    Bc = [bc_u_top, bc_u_right ]
+    
+
+    return  Bc
+
+
+def define_problem(eq1, eq2, Bc, phi_u, parameters):
     
     rel_tol = parameters['rel_tol']
     abs_tol = parameters['abs_tol']
@@ -413,7 +457,7 @@ def define_problem(eq1, eq2, phi_u, parameters):
     J = derivative(L, phi_u)  # Compute the Jacobian
 
     # Define the problem
-    problem = NonlinearVariationalProblem(L, phi_u, J=J)
+    problem = NonlinearVariationalProblem(L, phi_u, Bc, J=J)
 
     # Create and configure the solver
     solver = NonlinearVariationalSolver(problem)
@@ -454,21 +498,23 @@ def update_solver_on_new_mesh(mesh_new, parameters, old_solution_vector= None, o
     # Define equations
     eq1 = calculate_equation_1(variables_dict, dep_var_dict, parameters) 
         
-    eq2 = calculate_equation_2(variables_dict, parameters)
+    eq2 = calculate_equation_2(variables_dict, dep_var_dict , parameters)
+
+    Bc = define_boundary_condition(variables_dict, parameters)
 
 
     # Define problem
-    solver = define_problem(eq1, eq2, solution_vector, parameters)
+    solver = define_problem(eq1, eq2, Bc, solution_vector, parameters)
 
     # Return whatever is appropriate, such as the solver or a status message
-    return solver, solution_vector, solution_vector_0, spaces
+    return solver, solution_vector, solution_vector_0, spaces, Bc
 
 #############################  END  #############################
 
 
 #################### Define Step 1 For Solving  ####################
 
-solver, solution_vector, solution_vector_0, spaces = update_solver_on_new_mesh(mesh, parameters)
+solver, solution_vector, solution_vector_0, spaces, Bc = update_solver_on_new_mesh(mesh, parameters)
 
 
 #############################  END  ###############################
@@ -478,7 +524,7 @@ solver, solution_vector, solution_vector_0, spaces = update_solver_on_new_mesh(m
 ############################ File Section #########################
 
 
-file = fe.XDMFFile("Isothermal_lamda_3.xdmf" ) # File Name To Save #
+file = fe.XDMFFile("Isothermal_lamda_3_try2_antitraping.xdmf" ) # File Name To Save #
 
 
 def write_simulation_data(Sol_Func, time, file, variable_names ):
@@ -532,12 +578,12 @@ for it in tqdm(range(0, 1000000000)):
 
 
     # Refining mesh
-    if it == 20 or it % 30 == 25 :
+    if it == 20 or it % 100 == 25 :
 
         start = time.perf_counter()
         mesh_new, mesh_info = refine_mesh(coarse_mesh, solution_vector_0, spaces, max_level, comm )
         # Update the solver and solution on the new mesh
-        solver, solution_vector, solution_vector_0, spaces = update_solver_on_new_mesh(mesh_new, parameters, solution_vector, solution_vector_0)
+        solver, solution_vector, solution_vector_0, spaces, Bc = update_solver_on_new_mesh(mesh_new, parameters, solution_vector, solution_vector_0)
         end = time.perf_counter()
         Time_Lentgh_of_refinment = end - start
 
